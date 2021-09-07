@@ -18,7 +18,7 @@ def set_seed(seed):
 
 
 if __name__ == '__main__':
-    set_seed(2019)
+    set_seed(2020)
     def str2bool(s):
         if s not in {'false', 'true'}:
             raise ValueError('Not a valid boolean string')
