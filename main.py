@@ -139,7 +139,7 @@ if __name__ == '__main__':
                            
             loss.backward()
             adam_optimizer.step()
-            # print("loss in epoch {} : loss is {},".format(epoch, loss.item()))
+            print("loss in epoch {} : loss is {},".format(epoch, loss.item()))
 
         if epoch % 20 == 0:
             model.eval()
