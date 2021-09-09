@@ -69,10 +69,6 @@ class TimeAwareMultiHeadAttention(torch.nn.Module):
 
         # seq length adaptive scaling
         attn_weights = attn_weights / (K_.shape[-1] ** 0.5)
-        # key masking, -2^32 lead to leaking, inf lead to nan
-        # 0 * inf = nan, then reduce_sum([nan,...]) = nan
-        # fixed a bug pointed out in https://github.com/pmixer/TiSASRec.pytorch/issues/2
-        # time_mask = time_mask.unsqueeze(-1).expand(attn_weights.shape[0], -1, attn_weights.shape[-1])
         time_mask = time_mask.unsqueeze(-1).repeat(self.head_num, 1, 1)
         time_mask = time_mask.expand(-1, -1, attn_weights.shape[-1])
         attn_mask = attn_mask.unsqueeze(0).expand(attn_weights.shape[0], -1, -1)
@@ -83,13 +79,9 @@ class TimeAwareMultiHeadAttention(torch.nn.Module):
         attn_weights = torch.where(attn_mask, paddings, attn_weights) # enforcing causality
 
         attn_weights = self.softmax(attn_weights) # code as below invalids pytorch backward rules
-        # attn_weights = torch.where(time_mask, paddings, attn_weights) # weird query mask in tf impl
-        # https://discuss.pytorch.org/t/how-to-set-nan-in-tensor-to-0/3918/4
-        # attn_weights[attn_weights != attn_weights] = 0 # rm nan for -inf into softmax case
         attn_weights = self.dropout(attn_weights)
         outputs = attn_weights.matmul(V_)
         outputs = outputs + attn_weights.unsqueeze(2).matmul(time_matrix_V_).reshape(outputs.shape)
-        # (num_head * N, T, C / num_head) -> (N, T, C)
         outputs = torch.cat(torch.split(outputs, Q.shape[0], dim=0), dim=2) # div batch_size
         return outputs
 
@@ -187,9 +179,6 @@ class HTP(torch.nn.Module):
         history_time_embs = time_embs[:, :self.args.maxlen]       # B * maxlen * d
         # target time
         perdiction_time_embs = time_embs[:, 1:self.args.maxlen+1]   # B * maxlen * d
-            # print(history_time_embs.shape, perdiction_time_embs.shape)
-        # mask 0th items(placeholder for dry-run) in log_seqs
-        # would be easier if 0th item could be an exception for training
         timeline_mask = torch.BoolTensor(log_seqs == 0).to(self.dev)  # B * len
         seqs *= ~timeline_mask.unsqueeze(-1)  # broadcast in last dim
 
@@ -266,7 +255,6 @@ class HTP(torch.nn.Module):
         return log_feats
     # TODO: RTIM module
     def perdiction_time_process(self, per_time_embs, history_time_embs, item_embs, Fu, attention_mask):
-        # 计算时间的影响因子
         src_time_embs = per_time_embs.unsqueeze(1)  # B * 1 * N * dim
         dst_time_embs = history_time_embs.unsqueeze(2)  # B * N * 1 * dim
         time_embs = (src_time_embs - dst_time_embs).sum(-1)  # B * N * N * d
@@ -279,15 +267,12 @@ class HTP(torch.nn.Module):
         time_attention = self.softmax(attn_weights)
         time_attention = time_attention * ~attention_mask  # B * N * N
 
-        # 计算意图
         # print(Fu.shape, item_embs.permute(0, 2, 1).shape)
         intent_attention = torch.matmul(Fu, item_embs.permute(0, 2, 1))  # B* N * N
         # print(intent_attention.shape, paddings.shape, attention_mask.shape)
         attn_weights = torch.where(attention_mask, paddings, intent_attention)   # enforcing causality
         intent_attention = self.softmax(attn_weights)
-        # intent_attention = intent_attention * ~attention_mask  # B * N * N
 
-        # 计算聚合评分
         attention = time_attention * intent_attention
         embs = torch.matmul(attention, item_embs)
 
@@ -298,16 +283,11 @@ class HTP(torch.nn.Module):
         if log_seqs.shape[0]==1:
             train=False
         
-#         time_embs = self.time_emb.weight
         year_embs = self.year_emb.weight
         month_embs = self.month_emb.weight
         day_embs = self.day_emb.weight
-#         print(year_embs.shape, month_embs.shape, day_embs.shape)
         time_embs = torch.cat((year_embs, month_embs, day_embs), dim=0)
-#         print(time_embs.shape, self.item_time_matrix.shape)
-#         assert 1 == 2
         
-#         item_time_embs = torch.sparse.mm(self.item_time_matrix, time_embs)
         item_time_embs = torch.sparse.mm(self.item_time_matrix, time_embs)
         if train:
             k = item_time_embs[log_seqs]
@@ -316,7 +296,6 @@ class HTP(torch.nn.Module):
 
         Q, K, V = self.Q_w(per_time_embs), self.K_w(k), self.V_w(seqs)
 
-#         Q, K, V = per_time_embs, k, seqs
         
         Q_ = torch.cat(torch.split(Q, self.abs_head_size, dim=2), dim=0)
         K_ = torch.cat(torch.split(K, self.abs_head_size, dim=2), dim=0)
@@ -328,7 +307,6 @@ class HTP(torch.nn.Module):
         attn_weights = attn_weights / (K_.shape[-1] ** 0.5)
         paddings = torch.ones(attn_weights.shape) * (-2 ** 32 + 1)  # -1e23 # float('-inf')
         paddings = paddings.to(self.dev)
-        # 扩展成batch
         attn_mask = attention_mask.unsqueeze(0).expand(attn_weights.shape[0], -1, -1)
         attn_weights = torch.where(attn_mask, paddings, attn_weights)  # enforcing causality
         attn_weights = self.softmax(attn_weights)  # code as below invalids pytorch backward rules
