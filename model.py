@@ -208,7 +208,7 @@ class HTP(torch.nn.Module):
         # return self.last_layernorm(E_abs)
         # RTIM module
         
-        E_recom = self.RITM_two(perdiction_time_embs, history_time_embs, item_time_interval, attention_mask, E_rel)
+        E_recom = self.RITM(perdiction_time_embs, history_time_embs, item_time_interval, attention_mask, E_rel)
         # E_recom = self.RITM(perdiction_time_embs, history_time_embs, item_time_interval, E_abs, attention_mask, seqs)
         # E_recom = self.last_layernorm(E_recom)  # 去掉这个效果会好一点
         # E_rel, _ = self.GRU(E_rel)
@@ -296,7 +296,7 @@ class HTP(torch.nn.Module):
         E_rel = self.last_layernorm(Q)
         return E_rel, interval
 
-    def RITM_two(self, per_time_embs, history_time_embs, item_time_interval, attention_mask, seqs):
+    def RITM(self, per_time_embs, history_time_embs, item_time_interval, attention_mask, seqs):
         src_time_embs = per_time_embs.unsqueeze(1)  # B * 1 * N * dim
         dst_time_embs = history_time_embs.unsqueeze(2)  # B * N * 1 * dim
           
