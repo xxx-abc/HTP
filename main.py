@@ -18,27 +18,27 @@ def set_seed(seed):
 
 
 if __name__ == '__main__':
-    set_seed(2020)
+    set_seed(2021)
     def str2bool(s):
         if s not in {'false', 'true'}:
             raise ValueError('Not a valid boolean string')
         return s == 'true'
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', default='Beauty', help='Sports | Beauty | Cloth | Tafeng | amazon_all')
+    parser.add_argument('--dataset', default='Tafeng', help='Sports | Beauty | Cloth | Tafeng | amazon_all')
     parser.add_argument('--train_dir', default='default')
-    parser.add_argument('--batch_size', default=1024, type=int)
+    parser.add_argument('--batch_size', default=256, type=int)
     parser.add_argument('--lr', default=0.0001, type=float)
-    parser.add_argument('--maxlen', default=15, type=int)
+    parser.add_argument('--maxlen', default=50, type=int)
     parser.add_argument('--hidden_units', default=50, type=int)
-    parser.add_argument('--num_blocks', default=2, type=int)
-    parser.add_argument('--num_epochs', default=501, type=int)
+    parser.add_argument('--num_blocks', default=1, type=int)
+    parser.add_argument('--num_epochs', default=801, type=int)
     parser.add_argument('--num_heads', default=10, type=int)
     parser.add_argument('--abs_num_heads', default=10, type=int)
-    
+    parser.add_argument('--ritm_num_heads', default=10, type=int)
     parser.add_argument('--dropout_rate', default=0.5, type=float)
     parser.add_argument('--l2_emb', default=0.0001, type=float)
-    parser.add_argument('--device', default='cuda:0', type=str)
+    parser.add_argument('--device', default='cuda:1', type=str)
     parser.add_argument('--inference_only', default=False, type=str2bool)
     parser.add_argument('--state_dict_path', default=None, type=str)
 
@@ -65,7 +65,7 @@ if __name__ == '__main__':
     f = open(os.path.join(args.dataset + '_' +args.train_dir, str(args.hidden_units) + '_' + str(args.maxlen) + '_' +str(args.num_heads)+ '_' + 'log.txt'), 'w')
     f.write('--------------------------------------------------------\n\n\n\n')
 
-    sampler = WarpSampler(user_train, usernum, itemnum, batch_size=args.batch_size, maxlen=args.maxlen, n_workers=1)
+    sampler = WarpSampler(user_train, usernum, itemnum, batch_size=args.batch_size, maxlen=args.maxlen, n_workers=3)
 
     model = HTP(usernum, itemnum, yearnum, monthnum, daynum, args, dataset.adj_mat).to(args.device)
     
@@ -79,7 +79,7 @@ if __name__ == '__main__':
 
     epoch_start_idx = 1
     
-
+    assert 1==2
     if args.state_dict_path is not None:
         try:
             model.load_state_dict(torch.load(args.state_dict_path))
@@ -113,6 +113,11 @@ if __name__ == '__main__':
 
     t0 = time.time()
 
+
+    max_ndcg = 0.0
+    max_hr = 0.0
+    max_mrr = 0.0
+
     for epoch in range(epoch_start_idx, args.num_epochs + 1):
         
         if args.inference_only: break # just to decrease identition
@@ -131,15 +136,19 @@ if __name__ == '__main__':
             # L2 norm
             for param in model.item_emb.parameters(): loss += args.l2_emb * torch.norm(param)
             for param in model.year_emb.parameters(): loss += args.l2_emb * torch.norm(param)
-            for param in model.month_emb.parameters(): loss += args.l2_emb * torch.norm(param)
+            # for param in model.month_emb.parameters(): loss += args.l2_emb * torch.norm(param)
             for param in model.day_emb.parameters(): loss += args.l2_emb * torch.norm(param)    
             for param in model.abs_pos_emb.parameters(): loss += args.l2_emb * torch.norm(param)
+            for param in model.W_interval.parameters(): loss += args.l2_emb * torch.norm(param)
+            # for param in model.f_i.parameters(): loss += args.l2_emb * torch.norm(param)
+            for param in model.W_t.parameters(): loss += args.l2_emb * torch.norm(param)
+
 
             w.add_scalar(f'BPRLoss/BPR', loss, epoch * num_batch + step)
                            
             loss.backward()
             adam_optimizer.step()
-            print("loss in epoch {} : loss is {},".format(epoch, loss.item()))
+            # print("loss in epoch {} : loss is {},".format(epoch, loss.item()))
 
         if epoch % 20 == 0:
             model.eval()
@@ -158,6 +167,11 @@ if __name__ == '__main__':
             w.add_scalars(f'Test/NDCG@10',
                           {str(10): t_test[0]}, epoch)
 
+            if t_test[0] >= max_ndcg:
+                max_ndcg = t_test[0]
+                max_hr = t_test[1]
+                max_mrr = t_test[2]
+
             f.flush()
             t0 = time.time()
             model.train()
@@ -171,3 +185,19 @@ if __name__ == '__main__':
     f.close()
     sampler.close()
     print("Done")
+    # return max_ndcg, max_hr, max_mrr
+
+
+
+#if __name__ == '__main__':
+#    max_ndcgs, max_hrs, max_mrrs = np.array([0.0, 0.0, 0.0, 0.0, 0.0]), np.array([0.0, 0.0, 0.0, 0.0, 0.0]), np.array([0.0, 0.0, #0.0,0.0, 0.0])
+#    head = [2]
+#    times = 3
+#    for idx, i in enumerate(head):
+#        for t in range(times):
+#            print("head is", i, "times is ", t, "sees is ", 2021-t)
+#            max_ndcg, max_hr, max_mrr = main(2021-t, i)
+#            max_ndcgs[idx] += max_ndcg
+#            max_hrs[idx] += max_hr
+#            max_mrrs[idx] += max_mrr
+#    print("avg NDCG is {}, avg HR is {} avg MRR is {}".format(max_ndcgs / times, max_hrs / times , max_mrrs / times))
