@@ -82,86 +82,6 @@ class GCN(torch.nn.Module):
 
 
 
-class PointWiseFeedForward(torch.nn.Module):
-    def __init__(self, hidden_units, dropout_rate): # wried, why fusion X 2?
-
-        super(PointWiseFeedForward, self).__init__()
-
-        self.conv1 = torch.nn.Conv1d(hidden_units, hidden_units, kernel_size=1)
-        self.dropout1 = torch.nn.Dropout(p=dropout_rate)
-        self.relu = torch.nn.ReLU()
-        self.conv2 = torch.nn.Conv1d(hidden_units, hidden_units, kernel_size=1)
-        self.dropout2 = torch.nn.Dropout(p=dropout_rate)
-
-    def forward(self, inputs):
-        outputs = self.dropout2(self.conv2(self.relu(self.dropout1(self.conv1(inputs.transpose(-1, -2))))))
-        outputs = outputs.transpose(-1, -2) # as Conv1D requires (N, C, Length)
-        outputs += inputs
-        return outputs
-
-
-class TimeAwareMultiHeadAttention(torch.nn.Module):
-    # required homebrewed mha layer for Ti/SASRec experiments
-    def __init__(self, hidden_size, head_num, dropout_rate, dev):
-        super(TimeAwareMultiHeadAttention, self).__init__()
-        self.Q_w = torch.nn.Linear(hidden_size, hidden_size)
-        self.K_w = torch.nn.Linear(hidden_size, hidden_size)
-        self.V_w = torch.nn.Linear(hidden_size, hidden_size)
-
-        self.WA_1 = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-        self.WA_2 = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-
-        self.dropout = torch.nn.Dropout(p=dropout_rate)
-        self.softmax = torch.nn.Softmax(dim=-1)
-
-        self.hidden_size = hidden_size
-        self.head_num = head_num
-        self.head_size = hidden_size // head_num
-        self.dropout_rate = dropout_rate
-        self.dev = dev
-
-    def forward(self, item_embs, time_mask, attn_mask, time_matrix):
-
-
-        queries, keys, value = item_embs, item_embs, item_embs
-
-        Q, K, V = self.Q_w(queries), self.K_w(keys), self.V_w(keys)
-        time_matrix_K = self.WA_1(time_matrix)
-        time_matrix_V = self.WA_2(time_matrix)
-        # head dim * batch dim for parallelization (h*N, T, C/h)
-        Q_ = torch.cat(torch.split(Q, self.head_size, dim=2), dim=0)
-        K_ = torch.cat(torch.split(K, self.head_size, dim=2), dim=0)
-        V_ = torch.cat(torch.split(V, self.head_size, dim=2), dim=0)
-
-        time_matrix_K_ = torch.cat(torch.split(time_matrix_K, self.head_size, dim=3), dim=0)
-        time_matrix_V_ = torch.cat(torch.split(time_matrix_V, self.head_size, dim=3), dim=0)
-
-        # batched channel wise matmul to gen attention weights
-        attn_weights = Q_.matmul(torch.transpose(K_, 1, 2))
-        attn_weights = attn_weights + time_matrix_K_.matmul(Q_.unsqueeze(-1)).squeeze(-1)
-
-        # seq length adaptive scaling
-        attn_weights = attn_weights / (K_.shape[-1] ** 0.5)
-
-        time_mask = time_mask.unsqueeze(-1).repeat(self.head_num, 1, 1)
-        time_mask = time_mask.expand(-1, -1, attn_weights.shape[-1])
-        attn_mask = attn_mask.unsqueeze(0).expand(attn_weights.shape[0], -1, -1)
-
-        paddings = torch.ones(attn_weights.shape) *  (-2**32+1) # -1e23 # float('-inf')
-        paddings = paddings.to(self.dev)
-        attn_weights = torch.where(time_mask, paddings, attn_weights) # True:pick padding
-        attn_weights = torch.where(attn_mask, paddings, attn_weights) # enforcing causality
-
-        attn_weights = self.softmax(attn_weights)
-
-        attn_weights = self.dropout(attn_weights)
-        outputs = attn_weights.matmul(V_)
-        outputs = outputs + attn_weights.unsqueeze(2).matmul(time_matrix_V_).reshape(outputs.shape)
-        # (num_head * N, T, C / num_head) -> (N, T, C)
-        outputs = torch.cat(torch.split(outputs, Q.shape[0], dim=0), dim=2) # div batch_size
-        return outputs
-
-
 class HTP(torch.nn.Module):
     def __init__(self, user_num, item_num, yearnum, monthnum, daynum, args, item_time_matirx):
         super(HTP, self).__init__()
@@ -325,45 +245,6 @@ class HTP(torch.nn.Module):
         logits = item_embs.matmul(final_feat.unsqueeze(-1)).squeeze(-1)
 
         return logits # preds # (U, I)
-    # TODO: ITIM module
-    def relative_time_process(self, seqs, timeline_mask, attention_mask, time_matrices):
-
-        for i in range(len(self.attention_layers)):
-
-            Q = self.attention_layernorms[i](seqs)  # PyTorch mha requires time first fmt
-            mha_outputs = self.attention_layers[i](Q,
-                                                   timeline_mask, attention_mask, time_matrices)
-            seqs = Q + mha_outputs
-
-            seqs = self.forward_layernorms[i](seqs)
-            seqs = self.forward_layers[i](seqs)
-            seqs *= ~timeline_mask.unsqueeze(-1)
-
-        log_feats = self.last_layernorm(seqs)
-
-        return log_feats
-    # TODO: RTIM module
-    def perdiction_time_process(self, per_time_embs, history_time_embs, item_embs, Fu, attention_mask):
-        src_time_embs = per_time_embs.unsqueeze(1)  # B * 1 * N * dim
-        dst_time_embs = history_time_embs.unsqueeze(2)  # B * N * 1 * dim
-        time_embs = (src_time_embs - dst_time_embs).sum(-1)  # B * N * N * d
-
-        paddings = torch.ones(time_embs.shape) * (-2 ** 32 + 1)  # -1e23 # float('-inf')
-        paddings = paddings.to(self.dev)
-        attn_weights = torch.where(attention_mask, paddings, time_embs)  # enforcing causality
-
-        time_attention = self.softmax(attn_weights)
-        time_attention = time_attention * ~attention_mask  # B * N * N
-
-        intent_attention = torch.matmul(Fu, item_embs.permute(0, 2, 1))  # B* N * N
-
-        attn_weights = torch.where(attention_mask, paddings, intent_attention)   # enforcing causality
-        intent_attention = self.softmax(attn_weights)
-
-        attention = time_attention * intent_attention
-        embs = torch.matmul(attention, item_embs)
-
-        return embs
     # TODO: ATM module
     def absolut_time_process(self, seqs, log_seqs, per_time_embs, attention_mask, timeline_mask):
         train = True
@@ -414,33 +295,6 @@ class HTP(torch.nn.Module):
 
         E_rel = self.last_layernorm(Q)
         return E_rel, interval
-
-    def RITM(self, per_time_embs, history_time_embs, item_time_interval, attention_mask, seqs):
-        src_time_embs = per_time_embs.unsqueeze(1)  # B * 1 * N * dim
-        dst_time_embs = history_time_embs.unsqueeze(2)  # B * N * 1 * dim
-          
-        per_time_interval = src_time_embs - dst_time_embs # B * N * N * d
-        # 时间间隔注意力
-        # time_embs = (src_time_embs - dst_time_embs).sum(-1)
-        time_embs = self.W_t(per_time_interval).reshape(src_time_embs.shape[0], src_time_embs.shape[2], src_time_embs.shape[2])
-        # time_embs = torch.exp(-torch.sigmoid((src_time_embs - dst_time_embs).sum(-1)))  # B * N * N
-        paddings = torch.ones(time_embs.shape) * (-2 ** 32 + 1)  # -1e23 # float('-inf')
-        paddings = paddings.to(self.dev)
-        attn_weights = torch.where(attention_mask, paddings, time_embs)  # enforcing causality
-        time_attention = self.softmax(attn_weights)
-        time_attention = time_attention * ~attention_mask  # B * N * N
-
-        # 意图注意力
-        # intent_attention = torch.matmul(Fu, item_embs.permute(0, 2, 1))  # B* N * N
-        interval_attention = per_time_interval.matmul(self.W_interval(item_time_interval).unsqueeze(-1)).squeeze(-1)
-        # intent_attention = intent_attention - interval_attention
-        attn_weights = torch.where(attention_mask, paddings, interval_attention)   # enforcing causality
-        interval_attention = self.softmax(attn_weights)
-        interval_attention = interval_attention * ~attention_mask
-
-        attention = time_attention * interval_attention
-        embs = torch.matmul(attention, seqs)
-        return embs
 
     def RITM_two(self, per_time_embs, history_time_embs, item_time_interval, attention_mask, seqs):
         src_time_embs = per_time_embs.unsqueeze(1)  # B * 1 * N * dim
