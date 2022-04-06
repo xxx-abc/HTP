@@ -42,7 +42,7 @@ class DateSet(object):
                 t = datetime.fromtimestamp(i[1])
                 
                 day_csv.add(int(t.strftime('%j')))
-                year_csv.add(int(t.strftime('%j')) % 7)
+                year_csv.add(t.year)
                 month_csv.add(t.month)
         
         self.user_num, self.item_num  = len(user_csv) + 1, len(item_csv) + 1
@@ -58,7 +58,7 @@ class DateSet(object):
         self.User_train = defaultdict(list)
         for u, info in user_train.items():
             sorted_info = sorted(info, key=lambda x: x[1])
-            sorted_info = list(map(lambda x: [i_map_csv[x[0]], [y_map_csv[int(datetime.fromtimestamp(x[1]).strftime('%j'))%7], 
+            sorted_info = list(map(lambda x: [i_map_csv[x[0]], [y_map_csv[datetime.fromtimestamp(x[1]).year], 
                                                m_map_csv[datetime.fromtimestamp(x[1]).month],
                                                d_map_csv[int(datetime.fromtimestamp(x[1]).strftime('%j'))]]], sorted_info))
 

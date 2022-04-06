@@ -3,6 +3,7 @@ from multiprocessing import Process, Queue
 import random
 import sys
 import copy
+from sklearn.metrics import roc_auc_score
 
 def random_neq(l, r, s):
     t = np.random.randint(l, r)
@@ -89,10 +90,12 @@ def evaluate(model, dataset, args):
     HT = 0.0
     MRR = 0.0
     valid_user = 0.0
-    if usernum>10000:
-        users = random.sample(range(1, usernum), 10000)
-    else:
-        users = range(1, usernum)
+    
+    AUC = 0.0
+    true_label = [0 for i in range(101)]
+    true_label[0] = 1
+    users = range(1, usernum)
+    
     for u in users:
         # print(u, end=' ')
         if len(train[u]) < 1 or len(test[u]) < 1: continue
@@ -126,7 +129,10 @@ def evaluate(model, dataset, args):
         rated.add(valid[u][0][0])
         rated.add(test[u][0][0])
         rated.add(0)
-        item_idx = [test[u][0][0]]
+        item_idx = [test[u][0][0]]    
+#         for i in range(1, itemnum):
+#             if i != test[u][0][0]:
+#                 item_idx.append(i)
         for _ in range(100):
             t = np.random.randint(1, itemnum)
             while t in rated: t = np.random.randint(1, itemnum)
@@ -136,7 +142,7 @@ def evaluate(model, dataset, args):
         predictions = predictions[0]
 
         rank = predictions.argsort().argsort()[0].item()
-
+        AUC += roc_auc_score(y_true = true_label, y_score = -predictions.data.cpu().numpy())
         valid_user += 1
 
         if rank < 10:
@@ -147,7 +153,7 @@ def evaluate(model, dataset, args):
             print('.', end='')
             sys.stdout.flush()
 
-    return NDCG / valid_user, HT / valid_user, MRR / valid_user
+    return NDCG / valid_user, HT / valid_user, MRR / valid_user, AUC / valid_user
 
 # ignored
 def evaluate_valid(model, dataset, args):

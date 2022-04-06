@@ -10,9 +10,9 @@ FLOAT_MIN = -sys.float_info.max
 
 class GCN(torch.nn.Module):
     
-    def __init__(self, dims, head_num, dev) -> None:
+    def __init__(self, dims, head_num,k, dev) -> None:
         super(GCN, self).__init__()
-
+        self.K = k
         self.dim = dims
         self.dev = dev
         self.head_size = self.dim // head_num
@@ -30,7 +30,7 @@ class GCN(torch.nn.Module):
 
     def forward(self, seqs, attention_mask, time_matrices):
         
-        # relu 作用在于去掉0
+        # 
         a_ = self.conv1(seqs.permute(0, 2, 1)).permute(0, 2, 1)
         b_ = self.conv2(seqs.permute(0, 2, 1)).permute(0, 2, 1)
 
@@ -58,9 +58,9 @@ class GCN(torch.nn.Module):
         attn_mask = attention_mask.unsqueeze(0).expand(raw_graph.shape[0], -1, -1) 
         raw_graph = torch.where(attn_mask, paddings, raw_graph)  
 
-        _, indices = raw_graph.topk(k=3, dim=-1)
+        _, indices = raw_graph.topk(k=self.K, dim=-1)
         mask = torch.zeros(raw_graph.shape).to(self.dev)
-        # 改进算法
+        # 
         for i in range(raw_graph.shape[1]):
             mask[torch.arange(raw_graph.shape[0]).view(-1, 1), i, indices[:, i, :]] = 1.
             mask[torch.arange(raw_graph.shape[0]).view(-1, 1), indices[:, i, :], i] = 1.
@@ -120,21 +120,6 @@ class HTP(torch.nn.Module):
         self.forward_layers = torch.nn.ModuleList()
         self.last_layernorm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
 
-        for _ in range(args.num_blocks):
-            new_attn_layernorm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
-            self.attention_layernorms.append(new_attn_layernorm)
-            new_attn_layer = TimeAwareMultiHeadAttention(args.hidden_units,
-                                                            args.num_heads,
-                                                            args.dropout_rate,
-                                                            args.device)
-            self.attention_layers.append(new_attn_layer)
-
-            new_fwd_layernorm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
-            self.forward_layernorms.append(new_fwd_layernorm)
-
-            new_fwd_layer = PointWiseFeedForward(args.hidden_units, args.dropout_rate)
-            self.forward_layers.append(new_fwd_layer)
-
         # RTIM->GRU(x)->F_u
         self.GRU = torch.nn.GRU(input_size=args.hidden_units, hidden_size=args.hidden_units,
                                 num_layers=1, batch_first=True)
@@ -149,7 +134,7 @@ class HTP(torch.nn.Module):
         
         self.GCN_block = torch.nn.ModuleList()
         for _ in range(args.num_blocks):
-            gcn = GCN(self.dim, args.num_heads, args.device)
+            gcn = GCN(self.dim, args.num_heads,args.K, args.device)
             self.GCN_block.append(gcn)
 
         
@@ -158,9 +143,6 @@ class HTP(torch.nn.Module):
         self.W_interval = torch.nn.Linear(self.abs_head_size, self.abs_head_size)
 
 
-        self.f_i = torch.nn.Linear(self.dim, self.dim)
-        self.f_r = torch.nn.Linear(self.dim, self.dim)
-        self.f_a = torch.nn.Linear(self.dim, self.dim)
     def seq2feats(self, user_ids, log_seqs, year, month, day):
         # item embedding
         seqs = self.item_emb(torch.LongTensor(log_seqs).to(self.dev))
@@ -185,7 +167,6 @@ class HTP(torch.nn.Module):
         day_embs = self.day_emb_dropout(day_embs)
         
         time_embs = year_embs + month_embs + day_embs
-        # time_embs = year_embs + day_embs
 
         # history time
         history_time_embs = time_embs[:, :self.args.maxlen]       # B * maxlen * d
@@ -205,15 +186,9 @@ class HTP(torch.nn.Module):
         E_rel, item_time_interval = self.ITIM(seqs_pos, timeline_mask, attention_mask, time_matrices)
         # ATM module
         E_abs, _ = self.absolut_time_process(seqs_pos, log_seqs, perdiction_time_embs, attention_mask, timeline_mask.unsqueeze(-1))
-        # return self.last_layernorm(E_abs)
         # RTIM module
         
         E_recom = self.RITM(perdiction_time_embs, history_time_embs, item_time_interval, attention_mask, E_rel)
-        # E_recom = self.RITM(perdiction_time_embs, history_time_embs, item_time_interval, E_abs, attention_mask, seqs)
-        # E_recom = self.last_layernorm(E_recom)  # 去掉这个效果会好一点
-        # E_rel, _ = self.GRU(E_rel)
-        # E_rel = E_rel * ~timeline_mask.unsqueeze(-1)
-        # Fusion
         log_feats = E_recom + self.last_layernorm(E_abs) + self.last_layernorm(E_rel)
         
         return log_feats
@@ -251,10 +226,8 @@ class HTP(torch.nn.Module):
         if log_seqs.shape[0]==1:
             train=False
 
-        # year_embs = torch.zeros(self.year_emb.weight.shape).to(self.dev)
         year_embs = self.year_emb.weight
         month_embs = self.month_emb.weight
-        # month_embs = torch.zeros(self.month_emb.weight.shape).to(self.dev)
         day_embs = self.day_emb.weight
 
         time_embs = torch.cat((year_embs, month_embs, day_embs), dim=0)
@@ -266,7 +239,6 @@ class HTP(torch.nn.Module):
 
 
         Q, K, V = per_time_embs, k, seqs
-        # Q, K, V = self.Q_w(per_time_embs), self.K_w(k), self.V_w(seqs)
         Q_ = torch.cat(torch.split(Q, self.abs_head_size, dim=2), dim=0)
         K_ = torch.cat(torch.split(K, self.abs_head_size, dim=2), dim=0)
         V_ = torch.cat(torch.split(V, self.abs_head_size, dim=2), dim=0)
@@ -303,7 +275,7 @@ class HTP(torch.nn.Module):
         per_time_interval_ = src_time_embs - dst_time_embs # B * N * N * d
 
         per_time_interval = torch.cat(torch.split(per_time_interval_, self.ritm_head_size, dim=3), dim=0)
-        # 时间间隔注意力
+        
         # time_embs = (src_time_embs - dst_time_embs).sum(-1)
         time_embs = self.W_t(per_time_interval).reshape(per_time_interval.shape[0], src_time_embs.shape[2], src_time_embs.shape[2])
         # time_embs = torch.exp(-torch.sigmoid((src_time_embs - dst_time_embs).sum(-1)))  # B * N * N
@@ -314,7 +286,7 @@ class HTP(torch.nn.Module):
         time_attention = self.softmax(attn_weights)
         time_attention = time_attention * ~attention_mask  # B * N * N
 
-        # 意图注意力
+        
         # intent_attention = torch.matmul(Fu, item_embs.permute(0, 2, 1))  # B* N * N
         item_time_interval = torch.cat(torch.split(item_time_interval, self.ritm_head_size, dim=2), dim=0)
         interval_attention = per_time_interval.matmul(self.W_interval(item_time_interval).unsqueeze(-1)).squeeze(-1)
